@@ -34,6 +34,20 @@ def load_config():
 
 config = load_config()
 
+# Known legitimate email senders and their common email patterns
+LEGITIMATE_SENDER_PATTERNS = [
+    (r'discord', r'(discord\.com|discordapp\.com)'),
+    (r'google', r'(google\.com|gmail\.com)'),
+    (r'microsoft', r'(microsoft\.com|outlook\.com|live\.com)'),
+    (r'amazon', r'(amazon\.com|aws\.amazon\.com)'),
+    (r'apple', r'(apple\.com|icloud\.com)'),
+    (r'render', r'render\.com'),
+    (r'github', r'github\.com'),
+    (r'facebook', r'(facebook\.com|fb\.com|meta\.com)'),
+    (r'twitter', r'twitter\.com'),
+    (r'linkedin', r'linkedin\.com')
+]
+
 # Define direct Groq API function without using the library
 def call_groq_api(prompt, system_message="You are a security expert specialized in detecting email scams and phishing attempts."):
     """Call Groq API directly using requests instead of the groq library"""
@@ -77,6 +91,58 @@ def extract_domain(url):
         return url
 
 
+def is_likely_legitimate(sender, subject, links):
+    """Pre-check if an email is likely to be legitimate based on known patterns"""
+    if not sender or '@' not in sender:
+        return False, "No valid sender email"
+    
+    # Extract domain from sender email
+    sender_domain = sender.split('@')[1].lower()
+    
+    # Check if this appears to be a legitimate company email
+    matched_company = None
+    is_domain_match = False
+    
+    for company, domain_pattern in LEGITIMATE_SENDER_PATTERNS:
+        if re.search(domain_pattern, sender_domain, re.IGNORECASE):
+            matched_company = company
+            is_domain_match = True
+            break
+    
+    # If we found a potential company match, check for common legitimate email patterns
+    if matched_company:
+        # Check links to see if they match the sender's domain
+        if links:
+            link_domains = [extract_domain(link) for link in links]
+            matching_domains = 0
+            
+            for domain in link_domains:
+                if re.search(domain_pattern, domain, re.IGNORECASE):
+                    matching_domains += 1
+            
+            # If most links match the sender domain, it's more likely legitimate
+            if matching_domains / len(links) >= 0.7:
+                return True, f"Email appears to be from {matched_company} with matching links"
+    
+    # Look for common legitimate email subjects
+    common_legitimate_patterns = [
+        r'(welcome|confirm|verify|subscription|newsletter|receipt|invoice|order|shipping|delivery|account|update|security|privacy|terms|policy)',
+        r'(password reset|login|sign-in|2fa|two-factor|authentication)',
+        r'(notification|reminder|alert|news|announcement|payment|billing)'
+    ]
+    
+    subject_matches = 0
+    for pattern in common_legitimate_patterns:
+        if re.search(pattern, subject, re.IGNORECASE):
+            subject_matches += 1
+    
+    # If domain matches and subject contains common legitimate patterns
+    if is_domain_match and subject_matches > 0:
+        return True, f"Email appears to be a legitimate communication from {matched_company}"
+    
+    return False, "Needs further analysis"
+
+
 def analyze_links(links):
     """Analyze links for suspicious patterns"""
     suspicious_patterns = [
@@ -105,7 +171,7 @@ def analyze_links(links):
                 break
     
     # Look for domain inconsistency (multiple different domains)
-    if len(domains) > 2:  # More than 2 different domains can be suspicious
+    if len(domains) > 3:  # More than 3 different domains can be suspicious
         domain_mismatch = True
     
     return {
@@ -124,12 +190,20 @@ def analyze_email():
     
     email_content = data['content']
     
+    sender = email_content.get('sender', '')
+    subject = email_content.get('subject', '')
+    
+    # First, do a quick check to see if this is likely a legitimate email
+    likely_legitimate, reason = False, ""
+    if 'links' in email_content and email_content['links']:
+        likely_legitimate, reason = is_likely_legitimate(sender, subject, email_content['links'])
+    
     # Analyze links if present
     links_analysis = {}
     if 'links' in email_content and email_content['links']:
         links_analysis = analyze_links(email_content['links'])
     
-    # Create analysis prompt for the model
+    # Create analysis prompt for the model with better guidance
     prompt = f"""
     Analyze the following email content for signs of phishing, scams, or fraudulent activity.
 
@@ -142,23 +216,28 @@ def analyze_email():
 
     Links in email: {len(email_content.get('links', []))} links found
     {f"Suspicious links detected: {len(links_analysis.get('suspicious_links', []))}" if links_analysis else ""}
-    {f"Multiple different domains detected: {links_analysis.get('domain_mismatch', False)}" if links_analysis else ""}
+
+    PRELIMINARY ANALYSIS:
+    {f"This email appears to be legitimate: {reason}" if likely_legitimate else "This email needs careful analysis."}
 
     IMPORTANT GUIDANCE:
-    - Be extremely thorough in your analysis
-    - Do not assume an email is legitimate just because it appears to be from a well-known company
-    - Look for signs of impersonation, urgency, threats, or requests for sensitive information
-    - Many scams impersonate legitimate companies like Discord, Microsoft, or banking institutions
-    - Look for email address discrepancies (e.g., from Discord but using a gmail address)
-    - Examine URLs carefully - legitimate companies rarely use URL shorteners or strange domains
-    - Even if email address appears legitimate, the content may still be suspicious
+    - Many legitimate emails from companies like Google, Microsoft, Discord, etc. will include multiple links
+    - Standard informational or transactional emails from known companies are usually safe
+    - Common legitimate emails include: welcome messages, account updates, newsletters, receipts, order confirmations
+    - Login verification, password resets, and feature announcements from known companies are typically legitimate
+    - Policy updates and terms of service notifications are routine business communications
+
+    However, be alert for:
+    - Emails that create a sense of urgency about account suspension or security threats
+    - Requests for personal information, passwords, or financial details
+    - Obvious grammar or spelling errors in professional communications
+    - Demands for immediate action to avoid negative consequences
+    - Mismatched sender email addresses (e.g., Google notification from a non-Google domain)
 
     Provide an assessment categorizing this email as one of the following:
-    - "safe" - ONLY if you are VERY CONFIDENT the email is legitimate with no suspicious elements
-    - "suspicious" - If there are ANY concerning elements or you're not completely sure
-    - "scam" - If the email has clear signs of being a scam or phishing attempt
-
-    When in doubt, categorize as "suspicious" rather than "safe".
+    - "safe" - The email appears to be a legitimate business communication with no suspicious elements
+    - "suspicious" - The email has concerning elements that warrant caution
+    - "scam" - The email is clearly attempting to scam, phish, or defraud the recipient
 
     Provide a brief explanation (1-3 sentences) for your assessment.
 
@@ -176,8 +255,25 @@ def analyze_email():
                 'reason': 'Groq API key not configured. Please set up your API key in the backend.'
             }), 500
             
-        # Call Groq API directly instead of using the library
-        system_message = "You are a security expert specialized in detecting email scams and phishing attempts. You are extremely cautious and thorough in your analysis. You know that many scams impersonate legitimate companies, so you never assume an email is safe based solely on the sender's name or domain."
+        # Call Groq API directly with an improved system message
+        system_message = """
+        You are a security expert specialized in detecting email scams and phishing attempts. 
+        
+        IMPORTANT: Don't be overly cautious with routine business emails. Many legitimate emails from companies:
+        - Contain multiple links (especially newsletters, promotional emails)
+        - Discuss account updates, policy changes, or feature announcements
+        - Request users to review terms of service
+        - Show links to social media or unsubscribe options
+        
+        These aspects alone don't make an email suspicious. Focus on truly suspicious indicators like:
+        - Urgency and threats
+        - Poor grammar in professional communications
+        - Requests for sensitive information
+        - Suspicious sender domains mismatched with the claimed identity
+        - Links to unusual or shortened URLs
+        
+        Only mark an email as "suspicious" when you have concrete reasons to doubt its legitimacy.
+        """
         
         try:
             model_response = call_groq_api(prompt, system_message)
@@ -185,6 +281,12 @@ def analyze_email():
             
             category = analysis.get("category", "suspicious")
             explanation = analysis.get("explanation", "Could not determine the reason.")
+            
+            # If our preliminary check deemed it legitimate, and the model is uncertain or borderline,
+            # lean toward marking it as safe
+            if likely_legitimate and category == "suspicious" and not "urgent" in explanation.lower() and not "sensitive" in explanation.lower():
+                category = "safe"
+                explanation = f"{explanation} However, this appears to be a routine communication from a recognized sender."
             
             # Map category to our result types
             result_type = {
