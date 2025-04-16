@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
-import groq
 import json
 import re
 from urllib.parse import urlparse
@@ -34,13 +33,30 @@ def load_config():
 
 config = load_config()
 
-# Initialize Groq client
-if not config["api_key"]:
-    print("Warning: GROQ_API_KEY not set in environment or config.json. API calls will fail.")
-    print(f"Please create a config.json file in the backend directory with this format:")
-    print('{"api_key": "your-groq-api-key", "model": "llama3-70b-8192", "temperature": 0.2}')
-else:
-    groq_client = groq.Client(api_key=config["api_key"])
+# Import Groq safely with error handling
+try:
+    import groq
+    # Initialize Groq client with safer instantiation
+    if not config["api_key"]:
+        print("Warning: GROQ_API_KEY not set in environment or config.json. API calls will fail.")
+        print(f"Please create a config.json file in the backend directory with this format:")
+        print('{"api_key": "your-groq-api-key", "model": "llama3-70b-8192", "temperature": 0.2}')
+        groq_client = None
+    else:
+        try:
+            # Try the standard initialization first
+            groq_client = groq.Client(api_key=config["api_key"])
+        except TypeError as e:
+            if 'got an unexpected keyword argument' in str(e):
+                # Fall back to a more basic initialization if needed
+                import os
+                os.environ["GROQ_API_KEY"] = config["api_key"]
+                groq_client = groq.Client()
+            else:
+                raise
+except ImportError:
+    print("Error: groq library not installed. Please install it with 'pip install groq'")
+    groq_client = None
 
 
 def extract_domain(url):
@@ -111,14 +127,14 @@ def analyze_email():
     EMAIL DETAILS:
     Subject: {email_content.get('subject', 'Unknown')}
     Sender: {email_content.get('senderName', '')} <{email_content.get('sender', 'Unknown')}>
-    
+
     Body:
     {email_content.get('body', '')}
-    
+
     Links in email: {len(email_content.get('links', []))} links found
     {f"Suspicious links detected: {len(links_analysis.get('suspicious_links', []))}" if links_analysis else ""}
     {f"Multiple different domains detected: {links_analysis.get('domain_mismatch', False)}" if links_analysis else ""}
-    
+
     IMPORTANT GUIDANCE:
     - Be extremely thorough in your analysis
     - Do not assume an email is legitimate just because it appears to be from a well-known company
@@ -132,11 +148,11 @@ def analyze_email():
     - "safe" - ONLY if you are VERY CONFIDENT the email is legitimate with no suspicious elements
     - "suspicious" - If there are ANY concerning elements or you're not completely sure
     - "scam" - If the email has clear signs of being a scam or phishing attempt
-    
+
     When in doubt, categorize as "suspicious" rather than "safe".
-    
+
     Provide a brief explanation (1-3 sentences) for your assessment.
-    
+
     Return your response in this JSON format:
     {{
         "category": "safe/suspicious/scam",
