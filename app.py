@@ -125,6 +125,10 @@ def is_likely_legitimate(sender, subject, links):
     if not sender:
         return False, "No sender information available"
     
+    # Initialize variables
+    is_domain_match = False
+    matched_company = None
+    
     # Check if this is a known security alert sender
     if sender.lower() in [s.lower() for s in KNOWN_SECURITY_SENDERS]:
         subject_lower = subject.lower()
@@ -142,9 +146,6 @@ def is_likely_legitimate(sender, subject, links):
         sender_domain = sender.split('@')[1].lower()
         
         # Check if this appears to be a legitimate company email
-        matched_company = None
-        is_domain_match = False
-        
         for company, domain_pattern in LEGITIMATE_SENDER_PATTERNS:
             if re.search(domain_pattern, sender_domain, re.IGNORECASE):
                 matched_company = company
