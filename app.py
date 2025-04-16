@@ -3,6 +3,7 @@ from flask_cors import CORS
 import os
 import json
 import re
+import requests
 from urllib.parse import urlparse
 
 app = Flask(__name__)
@@ -33,30 +34,38 @@ def load_config():
 
 config = load_config()
 
-# Import Groq safely with error handling
-try:
-    import groq
-    # Initialize Groq client with safer instantiation
+# Define direct Groq API function without using the library
+def call_groq_api(prompt, system_message="You are a security expert specialized in detecting email scams and phishing attempts."):
+    """Call Groq API directly using requests instead of the groq library"""
     if not config["api_key"]:
-        print("Warning: GROQ_API_KEY not set in environment or config.json. API calls will fail.")
-        print(f"Please create a config.json file in the backend directory with this format:")
-        print('{"api_key": "your-groq-api-key", "model": "llama3-70b-8192", "temperature": 0.2}')
-        groq_client = None
-    else:
-        try:
-            # Try the standard initialization first
-            groq_client = groq.Client(api_key=config["api_key"])
-        except TypeError as e:
-            if 'got an unexpected keyword argument' in str(e):
-                # Fall back to a more basic initialization if needed
-                import os
-                os.environ["GROQ_API_KEY"] = config["api_key"]
-                groq_client = groq.Client()
-            else:
-                raise
-except ImportError:
-    print("Error: groq library not installed. Please install it with 'pip install groq'")
-    groq_client = None
+        raise ValueError("Groq API key not configured")
+    
+    headers = {
+        "Authorization": f"Bearer {config['api_key']}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "model": config["model"],
+        "messages": [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt}
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": config["temperature"]
+    }
+    
+    response = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers=headers,
+        json=data
+    )
+    
+    if response.status_code != 200:
+        raise Exception(f"API request failed with status code {response.status_code}: {response.text}")
+    
+    result = response.json()
+    return result["choices"][0]["message"]["content"]
 
 
 def extract_domain(url):
@@ -167,35 +176,33 @@ def analyze_email():
                 'reason': 'Groq API key not configured. Please set up your API key in the backend.'
             }), 500
             
-        # Call Groq API for analysis
-        response = groq_client.chat.completions.create(
-            model=config["model"],
-            messages=[
-                {"role": "system", "content": "You are a security expert specialized in detecting email scams and phishing attempts. You are extremely cautious and thorough in your analysis. You know that many scams impersonate legitimate companies, so you never assume an email is safe based solely on the sender's name or domain."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format={"type": "json_object"},
-            temperature=config["temperature"]
-        )
+        # Call Groq API directly instead of using the library
+        system_message = "You are a security expert specialized in detecting email scams and phishing attempts. You are extremely cautious and thorough in your analysis. You know that many scams impersonate legitimate companies, so you never assume an email is safe based solely on the sender's name or domain."
         
-        # Parse the model's response
-        model_response = response.choices[0].message.content
-        analysis = json.loads(model_response)
-        
-        category = analysis.get("category", "suspicious")
-        explanation = analysis.get("explanation", "Could not determine the reason.")
-        
-        # Map category to our result types
-        result_type = {
-            "safe": "safe",
-            "suspicious": "suspicious", 
-            "scam": "scam"
-        }.get(category, "suspicious")
-        
-        return jsonify({
-            'result': result_type,
-            'reason': explanation
-        })
+        try:
+            model_response = call_groq_api(prompt, system_message)
+            analysis = json.loads(model_response)
+            
+            category = analysis.get("category", "suspicious")
+            explanation = analysis.get("explanation", "Could not determine the reason.")
+            
+            # Map category to our result types
+            result_type = {
+                "safe": "safe",
+                "suspicious": "suspicious", 
+                "scam": "scam"
+            }.get(category, "suspicious")
+            
+            return jsonify({
+                'result': result_type,
+                'reason': explanation
+            })
+        except Exception as api_error:
+            print(f"API Error: {str(api_error)}")
+            return jsonify({
+                'result': 'error',
+                'reason': f"Error calling Groq API: {str(api_error)}"
+            }), 500
     
     except Exception as e:
         print(f"Error analyzing email: {str(e)}")
@@ -209,9 +216,24 @@ def analyze_email():
 def check_connection():
     """Endpoint to check if the backend is running and properly configured"""
     has_api_key = bool(config["api_key"])
+    
+    if has_api_key:
+        # Test the API connection
+        try:
+            response = requests.get(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {config['api_key']}"}
+            )
+            api_accessible = response.status_code == 200
+        except:
+            api_accessible = False
+    else:
+        api_accessible = False
+    
     return jsonify({
         'status': 'online',
         'configured': has_api_key,
+        'api_accessible': api_accessible,
         'model': config["model"] if has_api_key else None
     })
 
